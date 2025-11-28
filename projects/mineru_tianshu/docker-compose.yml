@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  # MinIO 对象存储服务
+  minio:
+    image: minio/minio:latest
+    container_name: minio-tianshu
+    ports:
+      - "9200:9000"  # MinIO API
+      - "9201:9001"  # MinIO Console
+    volumes:
+      - minio-data:/data
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - mineru-network
+    restart: unless-stopped
+
+  # MinIO 初始化服务 - 创建 bucket 并设置公开访问权限
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin123;
+      mc mb local/tianshu-images --ignore-existing;
+      mc anonymous set download local/tianshu-images;
+      echo 'MinIO bucket initialized successfully';
+      exit 0;
+      "
+    networks:
+      - mineru-network
+
+  mineru-tianshu:
+    image: mineru-tianshu:latest
+    container_name: mineru-tianshu
+    build:
+      context: .
+      dockerfile: Dockerfile.tianshu
+    ports:
+      - "8100:8100"  # API Server
+      - "9100:9100"  # Worker Server
+    volumes:
+      # 输出文件持久化
+      - ${DATA_DIR:-~/mineru}/output:/data/output
+      # 上传文件持久化
+      - ${DATA_DIR:-~/mineru}/uploads:/data/uploads
+      # 临时文件持久化(确保跨容器访问)
+      - ${DATA_DIR:-~/mineru}/tmp:/tmp
+    environment:
+      # MinerU 配置
+      - MINERU_MODEL_SOURCE=local
+      # API 配置
+      - API_PORT=8100
+      # MinIO 配置
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin123
+      - MINIO_BUCKET=tianshu-images
+    # 覆盖默认启动命令,支持动态配置 Worker 数量
+    command: >
+      python start_all.py
+      --accelerator cpu
+      --api-port 8100
+      --worker-port 9100
+      --output-dir /data/output
+      --workers-per-device ${WORKERS_PER_DEVICE:-2}
+    restart: unless-stopped
+    depends_on:
+      - minio
+    networks:
+      - mineru-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    # CPU 资源限制(可选,防止占用过多资源)
+    # 当前配置: 服务器有32核CPU,分配24核给容器,保留8核给系统
+    # 注意: 服务器有 60GB 内存,保留 10GB 给系统
+    deploy:
+      resources:
+        limits:
+          cpus: '8'      # 本地测试: 最多使用 8 个 CPU 核心
+          memory: 16G    # 本地测试: 最多使用 16GB 内存
+        reservations:
+          cpus: '2'      # 本地测试: 预留 2 个 CPU 核心
+          memory: 4G     # 本地测试: 预留 4GB 内存
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Docker 网络
+networks:
+  mineru-network:
+    driver: bridge
+
+# 持久化卷
+volumes:
+  mineru-db:
+  mineru-output:
+  minio-data:

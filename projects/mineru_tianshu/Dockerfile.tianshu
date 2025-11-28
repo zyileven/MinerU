@@ -1,0 +1,92 @@
+# MinerU Tianshu Docker Image - CPU Version (China)
+# 天枢文档解析服务 - CPU版本(国内环境)
+
+FROM python:3.10-slim
+
+LABEL maintainer="MinerU Team"
+LABEL description="MinerU Tianshu - Enterprise Document Parsing Service (CPU Mode)"
+
+# 设置环境变量
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    # 使用国内镜像源
+    PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
+    PIP_TRUSTED_HOST=mirrors.aliyun.com \
+    # MinerU 配置
+    MINERU_MODEL_SOURCE=local \
+    # 工作目录
+    APP_HOME=/app/mineru_tianshu
+
+# 配置国内 apt 源(阿里云)
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
+
+# 安装系统依赖
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        # OpenCV 依赖
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+        libgomp1 \
+        # 音频/视频处理依赖
+        ffmpeg \
+        # 中文字体支持
+        fonts-noto-core \
+        fonts-noto-cjk \
+        fontconfig \
+        # 网络工具(调试用)
+        curl \
+        wget \
+        # Git(可能需要)
+        git \
+    && fc-cache -fv \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 创建工作目录
+WORKDIR ${APP_HOME}
+
+# 复制依赖文件
+COPY requirements.txt .
+
+# 安装 Python 依赖
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip setuptools wheel && \
+    pip install -r requirements.txt
+
+# 下载 MinerU 模型(使用 modelscope 国内源)
+# 临时覆盖 MINERU_MODEL_SOURCE 为 modelscope 以便下载
+RUN MINERU_MODEL_SOURCE=modelscope mineru-models-download -s modelscope -m all && \
+    echo "✅ Models downloaded successfully"
+
+# 复制项目文件
+COPY task_db.py .
+COPY api_server.py .
+COPY litserve_worker.py .
+COPY task_scheduler.py .
+COPY start_all.py .
+COPY client_example.py .
+
+# 创建数据和输出目录
+RUN mkdir -p /data/db /data/output && \
+    chmod -R 755 /data
+
+# 暴露端口
+# API Server: 8100
+# Worker Server: 9100
+EXPOSE 8100 9100
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8100/docs || exit 1
+
+# 启动脚本
+CMD ["python", "start_all.py", \
+     "--accelerator", "cpu", \
+     "--api-port", "8100", \
+     "--worker-port", "9100", \
+     "--output-dir", "/data/output", \
+     "--workers-per-device", "2"]

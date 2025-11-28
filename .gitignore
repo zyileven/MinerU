@@ -1,6 +1,10 @@
 *.tar
 *.tar.gz
 *.zip
+
+# Docker镜像导出目录
+docker-images/
+
 venv*/
 envs/
 slurm_logs/
