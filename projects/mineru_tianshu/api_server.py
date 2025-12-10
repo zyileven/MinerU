@@ -7,6 +7,7 @@ MinerU Tianshu - API Server
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import tempfile
 from pathlib import Path
 from loguru import logger
@@ -17,7 +18,7 @@ import os
 import re
 import uuid
 import json
-from minio import Minio
+import shutil
 
 from task_db import TaskDB
 
@@ -44,18 +45,47 @@ db = TaskDB()
 OUTPUT_DIR = Path('/tmp/mineru_tianshu_output')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# MinIO 配置
+# 配置静态文件目录
+STATIC_DIR = Path('/app/static')
+STATIC_IMAGE_DIR = STATIC_DIR / 'images'
+STATIC_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+# 挂载静态文件服务
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# 获取服务器外部访问地址
+SERVER_BASE_URL = os.getenv('SERVER_BASE_URL', 'http://localhost:8100')
+
+logger.info(f"📁 Static files directory: {STATIC_DIR}")
+logger.info(f"🖼️  Images directory: {STATIC_IMAGE_DIR}")
+logger.info(f"🌐 Server base URL: {SERVER_BASE_URL}")
+
+# MinIO 配置 (可选,通过环境变量 USE_MINIO=true 启用)
+USE_MINIO = os.getenv('USE_MINIO', 'false').lower() == 'true'
 MINIO_CONFIG = {
     'endpoint': os.getenv('MINIO_ENDPOINT', ''),
     'access_key': os.getenv('MINIO_ACCESS_KEY', ''),
     'secret_key': os.getenv('MINIO_SECRET_KEY', ''),
-    'secure': True,
-    'bucket_name': os.getenv('MINIO_BUCKET', '')
+    'secure': os.getenv('MINIO_SECURE', 'true').lower() == 'true',
+    'bucket_name': os.getenv('MINIO_BUCKET', 'mineru-images'),
 }
+
+if USE_MINIO:
+    try:
+        from minio import Minio
+        logger.info(f"🗄️  MinIO enabled: {MINIO_CONFIG['endpoint']}/{MINIO_CONFIG['bucket_name']}")
+    except ImportError:
+        logger.warning("⚠️  MinIO enabled but 'minio' package not installed. Falling back to local storage.")
+        USE_MINIO = False
+else:
+    logger.info(f"📁 Using local static storage (MinIO disabled)")
 
 
 def get_minio_client():
     """获取MinIO客户端实例"""
+    if not USE_MINIO:
+        raise RuntimeError("MinIO is not enabled")
+    from minio import Minio
     return Minio(
         endpoint=MINIO_CONFIG['endpoint'],
         access_key=MINIO_CONFIG['access_key'],
@@ -64,63 +94,92 @@ def get_minio_client():
     )
 
 
-def process_markdown_images(md_content: str, image_dir: Path, upload_images: bool = False):
+def process_markdown_images(md_content: str, image_dir: Path, upload_images: bool = True, use_minio: Optional[bool] = None):
     """
-    处理 Markdown 中的图片引用
-    
+    处理 Markdown 中的图片引用,复制到静态目录或上传到 MinIO
+
     Args:
         md_content: Markdown 内容
         image_dir: 图片所在目录
-        upload_images: 是否上传图片到 MinIO 并替换链接
-        
+        upload_images: 是否处理图片(复制到静态目录或上传到 MinIO)
+        use_minio: 是否使用 MinIO(None=使用全局配置,True=强制使用,False=强制本地)
+
     Returns:
         处理后的 Markdown 内容
     """
     if not upload_images:
         return md_content
-    
+
+    # 确定使用哪种存储方式
+    if use_minio is None:
+        use_minio = USE_MINIO
+
+    # 如果要求使用 MinIO 但未启用,回退到本地存储
+    if use_minio and not USE_MINIO:
+        logger.warning("⚠️  MinIO requested but not enabled, using local storage")
+        use_minio = False
+
     try:
-        minio_client = get_minio_client()
-        bucket_name = MINIO_CONFIG['bucket_name']
-        minio_endpoint = MINIO_CONFIG['endpoint']
-        
+        if use_minio:
+            minio_client = get_minio_client()
+            bucket_name = MINIO_CONFIG['bucket_name']
+            minio_endpoint = MINIO_CONFIG['endpoint']
+            logger.info(f"🗄️  Using MinIO storage: {minio_endpoint}/{bucket_name}")
+        else:
+            logger.info(f"📁 Using local static storage: {STATIC_IMAGE_DIR}")
+
         # 查找所有 markdown 格式的图片
         img_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
-        
+
         def replace_image(match):
             alt_text = match.group(1)
             image_path = match.group(2)
-            
+
             # 构建完整的本地图片路径
             full_image_path = image_dir / Path(image_path).name
-            
+
             if full_image_path.exists():
                 # 获取文件后缀
                 file_extension = full_image_path.suffix
                 # 生成 UUID 作为新文件名
                 new_filename = f"{uuid.uuid4()}{file_extension}"
-                
-                try:
-                    # 上传到 MinIO
-                    object_name = f"images/{new_filename}"
-                    minio_client.fput_object(bucket_name=bucket_name, object_name=object_name, file_path=str(full_image_path))
 
-                    # 生成 MinIO 访问 URL
-                    scheme = 'https' if MINIO_CONFIG['secure'] else 'http'
-                    minio_url = f"{scheme}://{minio_endpoint}/{bucket_name}/{object_name}"
-                    
-                    # 返回 HTML 格式的 img 标签
-                    return f'<img src="{minio_url}" alt="{alt_text}">'
+                try:
+                    if use_minio:
+                        # 使用 MinIO 存储
+                        object_name = f"images/{new_filename}"
+                        minio_client.fput_object(
+                            bucket_name=bucket_name,
+                            object_name=object_name,
+                            file_path=str(full_image_path)
+                        )
+
+                        # 生成 MinIO 访问 URL
+                        scheme = 'https' if MINIO_CONFIG['secure'] else 'http'
+                        image_url = f"{scheme}://{minio_endpoint}/{bucket_name}/{object_name}"
+                        logger.debug(f"📸 Uploaded to MinIO: {full_image_path.name} → {image_url}")
+                    else:
+                        # 使用本地静态文件存储
+                        static_image_path = STATIC_IMAGE_DIR / new_filename
+                        shutil.copy2(full_image_path, static_image_path)
+
+                        # 生成本地 HTTP URL
+                        image_url = f"{SERVER_BASE_URL}/static/images/{new_filename}"
+                        logger.debug(f"📸 Copied to static: {full_image_path.name} → {image_url}")
+
+                    # 返回新的图片引用
+                    return f'![{alt_text}]({image_url})'
+
                 except Exception as e:
-                    logger.error(f"Failed to upload image to MinIO: {e}")
-                    return match.group(0)  # 上传失败，保持原样
-            
+                    logger.error(f"Failed to process image {full_image_path.name}: {e}")
+                    return match.group(0)  # 失败时保持原样
+
             return match.group(0)
-        
+
         # 替换所有图片引用
         new_content = re.sub(img_pattern, replace_image, md_content)
         return new_content
-        
+
     except Exception as e:
         logger.error(f"Error processing markdown images: {e}")
         return md_content  # 出错时返回原内容
@@ -165,13 +224,14 @@ def get_file_metadata(file_path: Path):
     }
 
 
-def get_images_info(image_dir: Path, upload_to_minio: bool = False):
+def get_images_info(image_dir: Path, generate_urls: bool = True, use_minio: Optional[bool] = None):
     """
-    获取图片目录信息
+    获取图片目录信息并生成访问 URL
 
     Args:
         image_dir: 图片目录路径
-        upload_to_minio: 是否上传到 MinIO
+        generate_urls: 是否生成图片访问 URL
+        use_minio: 是否使用 MinIO(None=使用全局配置,True=强制使用,False=强制本地)
 
     Returns:
         图片信息字典
@@ -180,8 +240,21 @@ def get_images_info(image_dir: Path, upload_to_minio: bool = False):
         return {
             'count': 0,
             'list': [],
-            'uploaded_to_minio': False
+            'urls_generated': False,
+            'storage_type': None
         }
+
+    # 确定使用哪种存储方式
+    if use_minio is None:
+        use_minio = USE_MINIO
+
+    # 如果要求使用 MinIO 但未启用,回退到本地存储
+    if use_minio and not USE_MINIO:
+        logger.warning("⚠️  MinIO requested but not enabled, using local storage")
+        use_minio = False
+
+    # 确定存储类型
+    storage_type = 'minio' if use_minio else 'local'
 
     # 支持的图片格式
     image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
@@ -196,27 +269,39 @@ def get_images_info(image_dir: Path, upload_to_minio: bool = False):
             'path': str(img_file.relative_to(image_dir.parent))
         }
 
-        # 如果需要上传到 MinIO
-        if upload_to_minio:
+        # 如果需要生成 URL
+        if generate_urls:
             try:
-                minio_client = get_minio_client()
-                bucket_name = MINIO_CONFIG['bucket_name']
-                minio_endpoint = MINIO_CONFIG['endpoint']
-
                 # 生成 UUID 作为新文件名
                 file_extension = img_file.suffix
                 new_filename = f"{uuid.uuid4()}{file_extension}"
-                object_name = f"images/{new_filename}"
 
-                # 上传到 MinIO
-                minio_client.fput_object(bucket_name=bucket_name, object_name=object_name, file_path=str(img_file))
+                if use_minio:
+                    # 使用 MinIO 存储
+                    minio_client = get_minio_client()
+                    bucket_name = MINIO_CONFIG['bucket_name']
+                    minio_endpoint = MINIO_CONFIG['endpoint']
+                    object_name = f"images/{new_filename}"
 
-                # 生成访问 URL
-                scheme = 'https' if MINIO_CONFIG['secure'] else 'http'
-                img_info['url'] = f"{scheme}://{minio_endpoint}/{bucket_name}/{object_name}"
+                    # 上传到 MinIO
+                    minio_client.fput_object(bucket_name=bucket_name, object_name=object_name, file_path=str(img_file))
+
+                    # 生成 MinIO 访问 URL
+                    scheme = 'https' if MINIO_CONFIG['secure'] else 'http'
+                    img_info['url'] = f"{scheme}://{minio_endpoint}/{bucket_name}/{object_name}"
+                    logger.debug(f"📸 Uploaded to MinIO: {img_file.name} → {img_info['url']}")
+                else:
+                    # 使用本地静态文件存储
+                    static_image_path = STATIC_IMAGE_DIR / new_filename
+                    shutil.copy2(img_file, static_image_path)
+
+                    # 生成本地 HTTP URL
+                    img_info['url'] = f"{SERVER_BASE_URL}/static/images/{new_filename}"
+                    img_info['static_filename'] = new_filename
+                    logger.debug(f"📸 Copied to static: {img_file.name} → {img_info['url']}")
 
             except Exception as e:
-                logger.error(f"Failed to upload image {img_file.name} to MinIO: {e}")
+                logger.error(f"Failed to process image {img_file.name}: {e}")
                 img_info['url'] = None
 
         images_list.append(img_info)
@@ -224,7 +309,8 @@ def get_images_info(image_dir: Path, upload_to_minio: bool = False):
     return {
         'count': len(images_list),
         'list': images_list,
-        'uploaded_to_minio': upload_to_minio
+        'urls_generated': generate_urls,
+        'storage_type': storage_type
     }
 
 

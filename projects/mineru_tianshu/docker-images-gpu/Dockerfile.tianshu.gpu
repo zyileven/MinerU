@@ -1,0 +1,112 @@
+# MinerU Tianshu Docker Image - GPU Version (China)
+# 天枢文档解析服务 - GPU版本(国内环境)
+
+FROM nvidia/cuda:12.0.0-runtime-ubuntu22.04
+
+LABEL maintainer="MinerU Team"
+LABEL description="MinerU Tianshu - Enterprise Document Parsing Service (GPU Mode)"
+
+# 设置环境变量
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    # NVIDIA/CUDA 环境变量
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    # MinerU 配置
+    MINERU_MODEL_SOURCE=local \
+    # 工作目录
+    APP_HOME=/app/mineru_tianshu
+
+# 配置国内 apt 源(阿里云镜像 - Ubuntu 22.04)
+RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
+    sed -i 's@//.*security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list
+
+# 安装 Python 3.10 和系统依赖
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        # Python 环境
+        python3.10 \
+        python3.10-dev \
+        python3-pip \
+        # lxml 编译依赖
+        libxml2-dev \
+        libxslt1-dev \
+        # OpenCV 依赖
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+        libgomp1 \
+        # 音频/视频处理依赖
+        ffmpeg \
+        # 中文字体支持
+        fonts-noto-core \
+        fonts-noto-cjk \
+        fontconfig \
+        # 网络工具(调试用)
+        curl \
+        wget \
+        # Git(可能需要)
+        git \
+    && fc-cache -fv \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置 Python 3.10 为默认 python3
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
+
+# 创建工作目录
+WORKDIR ${APP_HOME}
+
+# 复制依赖文件
+COPY requirements.txt .
+
+# 安装 Python 依赖 (分步安装避免依赖解析过深)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install --upgrade pip setuptools wheel && \
+    # 第一步: 先安装基础依赖 \
+    python3 -m pip install "torch>=2.0.0" "transformers>=4.40.0" "numpy>=1.24.0,<2.0.0" "einops>=0.8.0" && \
+    # 第二步: 安装 vLLM (最复杂的包) \
+    python3 -m pip install "vllm>=0.10.1.1,<0.12" && \
+    # 第三步: 安装 MinerU \
+    python3 -m pip install "mineru[core]>=2.5.0" && \
+    # 第四步: 安装其他依赖 \
+    python3 -m pip install -r requirements.txt || true && \
+    # 验证关键包是否安装成功 \
+    python3 -c "import vllm; import mineru; print('✅ vLLM and MinerU installed successfully')"
+
+# 下载 MinerU 模型(使用 modelscope 国内源)
+# 临时覆盖 MINERU_MODEL_SOURCE 为 modelscope 以便下载
+RUN MINERU_MODEL_SOURCE=modelscope mineru-models-download -s modelscope -m all && \
+    echo "✅ Models downloaded successfully"
+
+# 复制项目文件
+COPY task_db.py .
+COPY api_server.py .
+COPY litserve_worker.py .
+COPY task_scheduler.py .
+COPY start_all.py .
+COPY client_example.py .
+
+# 创建数据和输出目录
+RUN mkdir -p /data/db /data/output && \
+    chmod -R 755 /data
+
+# 暴露端口
+# API Server: 8100
+# Worker Server: 9100
+EXPOSE 8100 9100
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8100/docs || exit 1
+
+# 启动脚本 (GPU 模式)
+CMD ["python", "start_all.py", \
+     "--accelerator", "cuda", \
+     "--api-port", "8100", \
+     "--worker-port", "9100", \
+     "--output-dir", "/data/output", \
+     "--workers-per-device", "1"]

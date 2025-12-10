@@ -3,18 +3,54 @@
 # MinerU Tianshu - Docker 镜像构建脚本
 # ========================================
 # 用法:
-#   ./build-all-images.sh              # 快速构建(使用缓存)
-#   ./build-all-images.sh --no-cache   # 完整构建(不使用缓存)
+#   ./build-all-images.sh              # 构建 CPU 版本(默认)
+#   ./build-all-images.sh --gpu        # 构建 GPU 版本
+#   ./build-all-images.sh --no-cache   # CPU 版本完整构建
+#   ./build-all-images.sh --gpu --no-cache  # GPU 版本完整构建
 
 set -e
 
 # ========================================
+# 解析参数
+# ========================================
+BUILD_GPU=false
+BUILD_NO_CACHE=false
+
+for arg in "$@"; do
+    case $arg in
+        --gpu)
+            BUILD_GPU=true
+            shift
+            ;;
+        --no-cache)
+            BUILD_NO_CACHE=true
+            shift
+            ;;
+        *)
+            ;;
+    esac
+done
+
+# ========================================
 # 配置变量
 # ========================================
-IMAGE_NAME="mineru-tianshu"
-IMAGE_TAG="latest"
-DOCKERFILE="Dockerfile.tianshu"
-OUTPUT_DIR="./docker-images"
+if [ "$BUILD_GPU" = true ]; then
+    IMAGE_NAME="mineru-tianshu"
+    IMAGE_TAG="gpu"
+    DOCKERFILE="Dockerfile.tianshu.gpu"
+    COMPOSE_FILE="docker-compose.gpu.yml"
+    CONTAINER_NAME="mineru-tianshu-gpu"
+    OUTPUT_DIR="./docker-images-gpu"
+    VERSION_NAME="GPU"
+else
+    IMAGE_NAME="mineru-tianshu"
+    IMAGE_TAG="cpu"
+    DOCKERFILE="Dockerfile.tianshu.cpu"
+    COMPOSE_FILE="docker-compose.cpu.yml"
+    CONTAINER_NAME="mineru-tianshu"
+    OUTPUT_DIR="./docker-images-cpu"
+    VERSION_NAME="CPU"
+fi
 
 # ========================================
 # 颜色输出
@@ -33,6 +69,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 echo ""
 echo "========================================="
 echo "   MinerU Tianshu Docker 镜像构建"
+echo "   版本: ${VERSION_NAME}"
 echo "========================================="
 echo ""
 
@@ -45,6 +82,21 @@ if ! docker info &> /dev/null; then
     exit 1
 fi
 log_success "Docker 运行正常"
+
+# GPU 版本提示（跨平台构建场景）
+if [ "$BUILD_GPU" = true ]; then
+    log_info "构建 GPU 版本镜像..."
+    log_warning "⚠ 注意: 如果您在本地构建镜像但 GPU 在远程服务器上，这是正常的"
+    log_warning "  镜像会被正常构建，GPU 检查将在服务器上进行"
+    echo ""
+
+    # 可选：检查本地是否有 GPU（仅提示，不影响构建）
+    if docker run --rm --gpus all nvidia/cuda:12.0-base nvidia-smi &> /dev/null 2>&1; then
+        log_success "✓ 检测到本地 GPU 支持"
+    else
+        log_info "本地未检测到 GPU（如果 GPU 在服务器上，请忽略此提示）"
+    fi
+fi
 
 # 检查 buildx
 USE_BUILDX=false
@@ -61,12 +113,16 @@ fi
 mkdir -p "${OUTPUT_DIR}"
 
 echo ""
-log_info "步骤 1/3: 构建镜像"
+if [ "$BUILD_GPU" = true ]; then
+    log_info "步骤 1/3: 构建镜像"
+else
+    log_info "步骤 1/4: 构建镜像"
+fi
 echo ""
 
 # 确定构建参数
 BUILD_ARGS=""
-if [ "$1" = "--no-cache" ]; then
+if [ "$BUILD_NO_CACHE" = true ]; then
     log_warning "完整构建模式(不使用缓存) - 预计 30-60 分钟"
     BUILD_ARGS="--no-cache"
 else
@@ -77,6 +133,7 @@ fi
 log_info "镜像: ${IMAGE_NAME}:${IMAGE_TAG}"
 log_info "平台: linux/amd64 (适用于 Linux 服务器)"
 log_info "Dockerfile: ${DOCKERFILE}"
+log_info "Docker Compose: ${COMPOSE_FILE}"
 echo ""
 log_warning "开始构建，请耐心等待..."
 echo ""
@@ -117,7 +174,11 @@ log_success "✓ 镜像构建完成! 耗时: ${MINUTES}分${SECONDS}秒"
 # 验证架构
 # ========================================
 echo ""
-log_info "步骤 2/3: 验证镜像"
+if [ "$BUILD_GPU" = true ]; then
+    log_info "步骤 2/3: 验证镜像"
+else
+    log_info "步骤 2/4: 验证镜像"
+fi
 echo ""
 
 ARCH=$(docker inspect ${IMAGE_NAME}:${IMAGE_TAG} --format='{{.Architecture}}')
@@ -137,10 +198,14 @@ docker images ${IMAGE_NAME}:${IMAGE_TAG} --format "  Repository: {{.Repository}}
 # 导出镜像
 # ========================================
 echo ""
-log_info "步骤 3/3: 导出镜像"
+if [ "$BUILD_GPU" = true ]; then
+    log_info "步骤 3/3: 导出镜像"
+else
+    log_info "步骤 3/4: 导出镜像"
+fi
 echo ""
 
-OUTPUT_FILE="${OUTPUT_DIR}/${IMAGE_NAME}-image.tar"
+OUTPUT_FILE="${OUTPUT_DIR}/${IMAGE_NAME}-${IMAGE_TAG}-image.tar"
 
 log_info "导出镜像到: ${OUTPUT_FILE}"
 log_warning "请耐心等待，这可能需要几分钟..."
@@ -170,20 +235,39 @@ echo ""
 log_info "复制配置文件到 ${OUTPUT_DIR}..."
 echo ""
 
-# 1. 复制 docker-compose.yml
-if [ -f "docker-compose.yml" ]; then
-    cp docker-compose.yml "${OUTPUT_DIR}/"
-    log_success "✓ docker-compose.yml"
+# 1. 复制对应版本的 docker-compose 文件并移除 build 配置
+if [ -f "${COMPOSE_FILE}" ]; then
+    # 复制并移除 build 配置（服务器端不需要重新构建）
+    sed '/build:/,/dockerfile:/d' "${COMPOSE_FILE}" > "${OUTPUT_DIR}/docker-compose.yml"
+
+    # 修复镜像标签引用
+    if [ "$BUILD_GPU" = true ]; then
+        sed -i '' 's/image: mineru-tianshu:latest/image: mineru-tianshu:gpu/' "${OUTPUT_DIR}/docker-compose.yml" 2>/dev/null || \
+        sed -i 's/image: mineru-tianshu:latest/image: mineru-tianshu:gpu/' "${OUTPUT_DIR}/docker-compose.yml"
+    else
+        sed -i '' 's/image: mineru-tianshu:latest/image: mineru-tianshu:cpu/' "${OUTPUT_DIR}/docker-compose.yml" 2>/dev/null || \
+        sed -i 's/image: mineru-tianshu:latest/image: mineru-tianshu:cpu/' "${OUTPUT_DIR}/docker-compose.yml"
+    fi
+
+    log_success "✓ ${COMPOSE_FILE} → docker-compose.yml (已移除 build 配置)"
 else
-    log_warning "⚠ docker-compose.yml 不存在"
+    log_warning "⚠ ${COMPOSE_FILE} 不存在"
 fi
 
-# 2. 复制 Dockerfile.tianshu
-if [ -f "Dockerfile.tianshu" ]; then
-    cp Dockerfile.tianshu "${OUTPUT_DIR}/"
-    log_success "✓ Dockerfile.tianshu"
+# 2. 复制对应版本的 Dockerfile（保持原文件名）
+if [ -f "${DOCKERFILE}" ]; then
+    cp "${DOCKERFILE}" "${OUTPUT_DIR}/${DOCKERFILE}"
+    log_success "✓ ${DOCKERFILE}"
 else
-    log_warning "⚠ Dockerfile.tianshu 不存在"
+    log_warning "⚠ ${DOCKERFILE} 不存在"
+fi
+
+# 3. 复制 .env.example
+if [ -f ".env.example" ]; then
+    cp .env.example "${OUTPUT_DIR}/"
+    log_success "✓ .env.example"
+else
+    log_warning "⚠ .env.example 不存在"
 fi
 
 echo ""
@@ -197,7 +281,7 @@ log_info "生成部署文件..."
 
 # 生成镜像清单
 cat > "${OUTPUT_DIR}/images-manifest.txt" << EOF
-# MinerU Tianshu Docker 镜像清单
+# MinerU Tianshu Docker 镜像清单 (${VERSION_NAME} 版本)
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
 # 总文件数: 1
 # 总大小: ${FILE_SIZE}
@@ -250,15 +334,15 @@ if command -v rsync &> /dev/null; then
         "$SCRIPT_DIR"/images-manifest.txt \
         "$SCRIPT_DIR"/load-all-images.sh \
         "$SCRIPT_DIR"/docker-compose.yml \
-        "$SCRIPT_DIR"/Dockerfile.tianshu \
-        "$DESTINATION"
+        "$SCRIPT_DIR"/Dockerfile \
+        "$DESTINATION" 2>/dev/null || true
 else
     echo "使用 scp 上传..."
     scp "$SCRIPT_DIR"/*.tar \
         "$SCRIPT_DIR"/images-manifest.txt \
         "$SCRIPT_DIR"/load-all-images.sh \
         "$SCRIPT_DIR"/docker-compose.yml \
-        "$SCRIPT_DIR"/Dockerfile.tianshu \
+        "$SCRIPT_DIR"/Dockerfile \
         "$DESTINATION"
 fi
 
@@ -344,7 +428,7 @@ if [ $FAILED -eq 0 ]; then
 
         # 创建数据目录
         echo "创建数据目录..."
-        mkdir -p ~/mineru/output
+        mkdir -p ~/mineru/output ~/mineru/uploads ~/mineru/tmp
 
         # 询问是否启动服务
         read -p "是否立即启动服务? (yes/no): " -r
@@ -390,11 +474,83 @@ chmod +x "${OUTPUT_DIR}/load-all-images.sh"
 log_success "✓ 辅助脚本已生成"
 
 # ========================================
+# 启动容器服务（仅 CPU 版本）
+# ========================================
+if [ "$BUILD_GPU" = false ]; then
+    echo ""
+    echo "========================================="
+    echo "  步骤 4/4: 启动容器服务 (CPU 版本)"
+    echo "========================================="
+    echo ""
+
+    log_info "准备启动 MinerU Tianshu 容器..."
+    echo ""
+
+    # 创建必要的目录
+    log_info "创建数据目录..."
+    mkdir -p ./static_files/images
+    mkdir -p ~/mineru/output
+    mkdir -p ~/mineru/uploads
+    mkdir -p ~/mineru/tmp
+    log_success "✓ 数据目录已创建"
+
+    # 停止旧容器
+    log_info "停止旧容器..."
+    docker-compose -f "${COMPOSE_FILE}" stop 2>/dev/null || true
+    docker-compose -f "${COMPOSE_FILE}" rm -f 2>/dev/null || true
+    log_success "✓ 旧容器已停止"
+
+    # 启动容器
+    echo ""
+    log_info "启动 ${CONTAINER_NAME} 容器..."
+    docker-compose -f "${COMPOSE_FILE}" up -d
+
+    # 等待服务启动
+    echo ""
+    log_info "等待服务启动..."
+    sleep 10
+
+    # 检查容器状态
+    if docker ps | grep -q "${CONTAINER_NAME}"; then
+        log_success "✓ 容器启动成功"
+
+        # 显示容器信息
+        echo ""
+        log_info "容器状态:"
+        docker ps --filter "name=${CONTAINER_NAME}" --format "  名称: {{.Names}}\n  状态: {{.Status}}\n  端口: {{.Ports}}"
+
+        # 测试 API 服务
+        echo ""
+        log_info "测试 API 服务..."
+        sleep 5
+        if curl -f -s http://localhost:8100/docs > /dev/null 2>&1; then
+            log_success "✓ API 服务正常 (http://localhost:8100/docs)"
+        else
+            log_warning "⚠ API 服务暂未就绪，请稍后访问"
+        fi
+
+        # 测试静态文件服务
+        log_info "静态文件服务地址: http://localhost:8100/static/images/"
+
+    else
+        log_error "✗ 容器启动失败"
+        echo ""
+        log_info "查看日志:"
+        docker-compose -f "${COMPOSE_FILE}" logs
+        exit 1
+    fi
+fi
+
+# ========================================
 # 完成总结
 # ========================================
 echo ""
 echo "========================================="
-echo "  🎉 完成！"
+if [ "$BUILD_GPU" = true ]; then
+    echo "  🎉 构建完成！(${VERSION_NAME} 版本)"
+else
+    echo "  🎉 构建并启动完成！(${VERSION_NAME} 版本)"
+fi
 echo "========================================="
 echo ""
 log_info "输出目录: ${OUTPUT_DIR}/"
@@ -403,37 +559,85 @@ ls -lh "${OUTPUT_DIR}" | tail -n +2 | awk '{printf "  %s\t%s\n", $9, $5}'
 
 echo ""
 log_info "已包含的文件:"
-echo "  ✓ Docker 镜像 (mineru-tianshu-image.tar)"
+echo "  ✓ Docker 镜像 (${IMAGE_NAME}-${IMAGE_TAG}-image.tar)"
 echo "  ✓ 镜像清单 (images-manifest.txt)"
 echo "  ✓ Docker Compose 配置 (docker-compose.yml)"
-echo "  ✓ Dockerfile (Dockerfile.tianshu)"
+echo "  ✓ Dockerfile (${DOCKERFILE})"
 echo "  ✓ 加载脚本 (load-all-images.sh)"
 echo "  ✓ 上传脚本 (upload-all-images.sh)"
 
+# CPU 版本 - 显示本地服务访问信息
+if [ "$BUILD_GPU" = false ]; then
+    echo ""
+    echo "========================================="
+    echo "  本地服务访问"
+    echo "========================================="
+    echo ""
+    log_info "API 文档: http://localhost:8100/docs"
+    log_info "静态图片: http://localhost:8100/static/images/"
+    log_info "解析 API: http://localhost:8100/api/v1/parse"
+
+    echo ""
+    echo "========================================="
+    echo "  其他 Docker Compose 项目访问方式"
+    echo "========================================="
+    echo ""
+    log_info "方式1 - 通过主机IP (推荐):"
+    echo "  SERVER_BASE_URL=http://117.139.166.12:8100"
+    echo "  IMAGE_URL=http://117.139.166.12:8100/static/images/{uuid}.png"
+    echo ""
+    log_info "方式2 - 通过 host.docker.internal:"
+    echo "  SERVER_BASE_URL=http://host.docker.internal:8100"
+    echo "  IMAGE_URL=http://host.docker.internal:8100/static/images/{uuid}.png"
+
+    echo ""
+    echo "========================================="
+    echo "  常用命令"
+    echo "========================================="
+    echo ""
+    log_info "查看日志:"
+    echo "  docker-compose -f ${COMPOSE_FILE} logs -f"
+    echo ""
+    log_info "重启服务:"
+    echo "  docker-compose -f ${COMPOSE_FILE} restart"
+    echo ""
+    log_info "停止服务:"
+    echo "  docker-compose -f ${COMPOSE_FILE} stop"
+    echo ""
+    log_info "查看容器状态:"
+    echo "  docker ps"
+fi
+
+# GPU 版本 - 显示服务器部署信息
+if [ "$BUILD_GPU" = true ]; then
+    echo ""
+    echo "========================================="
+    echo "  上传到服务器"
+    echo "========================================="
+    echo ""
+    echo "如需部署到服务器，可使用:"
+    echo "  cd ${OUTPUT_DIR}"
+    echo "  ./upload-all-images.sh root@your-server:~/mineru_tianshu/"
+    echo ""
+    echo "手动上传:"
+    echo "  cd ${OUTPUT_DIR}"
+    echo "  rsync -avz --progress * root@your-server:~/mineru_tianshu/"
+    echo ""
+    echo "服务器端部署:"
+    echo "  ssh root@your-server"
+    echo "  cd ~/mineru_tianshu"
+    echo "  ./load-all-images.sh           # 加载镜像"
+    echo "  docker-compose up -d           # 启动服务"
+    echo "  docker-compose logs -f         # 查看日志"
+    echo ""
+    log_info "服务器常用命令:"
+    echo "  docker-compose down            # 停止服务"
+    echo "  docker-compose restart         # 重启服务"
+    echo "  docker ps                      # 查看容器状态"
+    echo "  nvidia-smi                     # 查看 GPU 使用"
+    echo "  watch -n 1 nvidia-smi          # 实时监控 GPU"
+fi
+
 echo ""
-echo "========================================="
-echo "  下一步"
-echo "========================================="
-echo ""
-echo "方案 1 - 使用上传脚本（推荐）:"
-echo "  cd ${OUTPUT_DIR}"
-echo "  ./upload-all-images.sh root@your-server:~/mineru_tianshu/"
-echo ""
-echo "方案 2 - 手动上传:"
-echo "  cd ${OUTPUT_DIR}"
-echo "  rsync -avz --progress * root@your-server:~/mineru_tianshu/"
-echo ""
-echo "服务器端部署:"
-echo "  ssh root@your-server"
-echo "  cd ~/mineru_tianshu"
-echo "  ./load-all-images.sh           # 加载镜像"
-echo "  docker-compose up -d           # 启动服务"
-echo "  docker-compose logs -f         # 查看日志"
-echo ""
-log_info "常用命令:"
-echo "  docker-compose down            # 停止服务"
-echo "  docker-compose restart         # 重启服务"
-echo "  docker ps                      # 查看容器状态"
-echo ""
-log_warning "提示: 如需修改配置(Worker 数量、数据目录等),请编辑 docker-compose.yml!"
+log_warning "提示: 如需修改配置(Worker 数量、数据目录等),请编辑 ${COMPOSE_FILE}!"
 echo ""

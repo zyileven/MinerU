@@ -1,0 +1,6 @@
+# MinerU Tianshu Docker 镜像清单 (GPU 版本)
+# 生成时间: 2025-12-09 17:42:50
+# 总文件数: 1
+# 总大小:  19G
+
+mineru-tianshu-gpu-image.tar	 19G	mineru-tianshu:gpu
