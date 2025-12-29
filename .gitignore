@@ -4,6 +4,8 @@
 
 # Docker镜像导出目录
 docker-images/
+projects/mineru_tianshu/docker-images-cpu/
+projects/mineru_tianshu/docker-images-gpu/
 
 venv*/
 envs/
