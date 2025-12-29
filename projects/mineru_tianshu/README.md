@@ -545,7 +545,7 @@ python start_all.py --cleanup-old-files-days 0
 mineru[core]>=2.5.0      # MinerU 核心
 fastapi>=0.115.0         # Web 框架
 litserve>=0.2.0          # GPU 负载均衡
-markitdown>=0.1.3        # Office 文档解析
+markitdown[all]>=0.1.3   # Office 文档解析(包含所有格式支持)
 minio>=7.2.0             # MinIO 对象存储
 ```
 

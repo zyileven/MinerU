@@ -35,7 +35,7 @@ loguru>=0.7.0
 # Office Document Parsing
 # 注意: markitdown 依赖 markdownify, 必须先指定兼容版本
 markdownify>=1.2.2
-markitdown>=0.1.3
+markitdown[all]>=0.1.3
 
 # MinIO Object Storage
 minio>=7.2.0

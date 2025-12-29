@@ -21,7 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
     sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
 
-# 安装系统依赖
+# 安装系统依赖(不含LibreOffice)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         # OpenCV 依赖
@@ -45,6 +45,16 @@ RUN apt-get update && \
     && fc-cache -fv \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# 安装 LibreOffice (使用官方源,避免阿里云镜像的大文件下载问题)
+RUN sed -i 's/mirrors.aliyun.com/deb.debian.org/g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libreoffice-writer \
+        libreoffice-core \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources
 
 # 创建工作目录
 WORKDIR ${APP_HOME}

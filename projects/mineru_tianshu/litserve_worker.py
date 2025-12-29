@@ -12,6 +12,8 @@ import time
 import threading
 import signal
 import atexit
+import subprocess
+import tempfile
 from pathlib import Path
 import litserve as ls
 from loguru import logger
@@ -333,11 +335,11 @@ class MinerUWorkerAPI(ls.LitAPI):
             except Exception as e:
                 logger.debug(f"Memory cleanup failed for task {task_id}: {e}")
     
-    def _parse_with_markitdown(self, file_path: Path, file_name: str, 
+    def _parse_with_markitdown(self, file_path: Path, file_name: str,
                                output_path: Path):
         """
         使用 markitdown 解析文档（支持 Office、HTML、文本等多种格式）
-        
+
         Args:
             file_path: 文件路径
             file_name: 文件名
@@ -345,17 +347,76 @@ class MinerUWorkerAPI(ls.LitAPI):
         """
         if not MARKITDOWN_AVAILABLE or self.markitdown is None:
             raise RuntimeError("markitdown is not available. Please install it: pip install markitdown")
-        
+
         logger.info(f"📊 Using MarkItDown to parse: {file_name}")
-        
-        # 使用 markitdown 转换文档
-        result = self.markitdown.convert(str(file_path))
-        
-        # 保存为 markdown 文件
-        output_file = output_path / f"{Path(file_name).stem}.md"
-        output_file.write_text(result.text_content, encoding='utf-8')
-        
-        logger.info(f"📝 Markdown saved to: {output_file}")
+
+        # 检查是否是 .doc 文件(旧版 Word 格式)
+        temp_file = None
+        convert_file_path = file_path
+
+        if file_path.suffix.lower() == '.doc':
+            logger.info(f"🔄 Detected .doc file, converting to .docx using LibreOffice...")
+            try:
+                # 创建临时目录用于转换
+                temp_dir = tempfile.mkdtemp()
+                temp_file = Path(temp_dir) / f"{file_path.stem}.docx"
+
+                # 使用 LibreOffice 将 .doc 转换为 .docx
+                # --headless: 无头模式(无GUI)
+                # --convert-to docx: 转换为docx格式
+                # --outdir: 输出目录
+                cmd = [
+                    'libreoffice',
+                    '--headless',
+                    '--convert-to', 'docx',
+                    '--outdir', temp_dir,
+                    str(file_path)
+                ]
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60  # 60秒超时
+                )
+
+                if result.returncode != 0:
+                    logger.error(f"❌ LibreOffice conversion failed: {result.stderr}")
+                    raise RuntimeError(f"Failed to convert .doc to .docx: {result.stderr}")
+
+                # 检查转换后的文件是否存在
+                if not temp_file.exists():
+                    raise RuntimeError(f"Converted file not found: {temp_file}")
+
+                logger.info(f"✅ Successfully converted .doc to .docx")
+                convert_file_path = temp_file
+
+            except subprocess.TimeoutExpired:
+                logger.error(f"❌ LibreOffice conversion timeout")
+                raise RuntimeError("LibreOffice conversion timeout (>60s)")
+            except Exception as e:
+                logger.error(f"❌ Failed to convert .doc file: {e}")
+                raise RuntimeError(f"Failed to convert .doc file: {e}")
+
+        try:
+            # 使用 markitdown 转换文档
+            result = self.markitdown.convert(str(convert_file_path))
+
+            # 保存为 markdown 文件
+            output_file = output_path / f"{Path(file_name).stem}.md"
+            output_file.write_text(result.text_content, encoding='utf-8')
+
+            logger.info(f"📝 Markdown saved to: {output_file}")
+
+        finally:
+            # 清理临时文件
+            if temp_file and temp_file.exists():
+                try:
+                    temp_file.unlink()
+                    temp_file.parent.rmdir()
+                    logger.debug(f"🗑️  Cleaned up temporary file: {temp_file}")
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to cleanup temp file: {e}")
     
     def predict(self, action):
         """
