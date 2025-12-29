@@ -333,26 +333,31 @@ async def submit_task(
     method: str = Form('auto', description="解析方法: auto/txt/ocr"),
     formula_enable: bool = Form(True, description="是否启用公式识别"),
     table_enable: bool = Form(True, description="是否启用表格识别"),
+    force_mineru: bool = Form(False, description="强制使用MinerU解析(Office文档会先转PDF再解析，确保图片内容被识别)"),
     priority: int = Form(0, description="优先级，数字越大越优先"),
 ):
     """
     提交文档解析任务
-    
+
     立即返回 task_id，任务在后台异步处理
+
+    参数说明:
+    - force_mineru=True: 所有格式都用MinerU解析(Office文档会先转PDF)，充分利用GPU，适合包含大量图片的文档
+    - force_mineru=False: PDF/图片用MinerU，其他格式用MarkItDown，速度更快
     """
     try:
         # 保存上传的文件到临时目录
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix)
-        
+
         # 流式写入文件到磁盘，避免高内存使用
         while True:
             chunk = await file.read(1 << 23)  # 8MB chunks
             if not chunk:
                 break
             temp_file.write(chunk)
-        
+
         temp_file.close()
-        
+
         # 创建任务
         task_id = db.create_task(
             file_name=file.filename,
@@ -363,12 +368,13 @@ async def submit_task(
                 'method': method,
                 'formula_enable': formula_enable,
                 'table_enable': table_enable,
+                'force_mineru': force_mineru,
             },
             priority=priority
         )
-        
-        logger.info(f"✅ Task submitted: {task_id} - {file.filename} (priority: {priority})")
-        
+
+        logger.info(f"✅ Task submitted: {task_id} - {file.filename} (priority: {priority}, force_mineru: {force_mineru})")
+
         return {
             'success': True,
             'task_id': task_id,
@@ -377,7 +383,7 @@ async def submit_task(
             'file_name': file.filename,
             'created_at': datetime.now().isoformat()
         }
-    
+
     except Exception as e:
         logger.error(f"❌ Failed to submit task: {e}")
         raise HTTPException(status_code=500, detail=str(e))

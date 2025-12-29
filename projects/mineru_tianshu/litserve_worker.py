@@ -14,6 +14,7 @@ import signal
 import atexit
 import subprocess
 import tempfile
+import shutil
 from pathlib import Path
 import litserve as ls
 from loguru import logger
@@ -50,6 +51,8 @@ class MinerUWorkerAPI(ls.LitAPI):
     # 支持的文件格式定义
     # MinerU 专用格式：PDF 和图片
     PDF_IMAGE_FORMATS = {'.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.webp'}
+    # Office 格式（可选择转换为 PDF 后使用 MinerU 解析）
+    OFFICE_FORMATS = {'.docx', '.doc', '.xlsx', '.xls', '.pptx', '.ppt'}
     # 其他所有格式都使用 MarkItDown 解析
     
     def __init__(self, output_dir='/tmp/mineru_tianshu_output', worker_id_prefix='tianshu', 
@@ -204,7 +207,7 @@ class MinerUWorkerAPI(ls.LitAPI):
     def _process_task(self, task: dict):
         """
         处理单个任务
-        
+
         Args:
             task: 任务字典
         """
@@ -213,17 +216,20 @@ class MinerUWorkerAPI(ls.LitAPI):
         file_name = task['file_name']
         backend = task['backend']
         options = json.loads(task['options'])
-        
-        logger.info(f"🔄 Processing task {task_id}: {file_name}")
-        
+
+        # 获取 force_mineru 参数
+        force_mineru = options.get('force_mineru', False)
+
+        logger.info(f"🔄 Processing task {task_id}: {file_name} (force_mineru={force_mineru})")
+
         try:
             # 准备输出目录
             output_path = self.output_dir / task_id
             output_path.mkdir(parents=True, exist_ok=True)
-            
+
             # 判断文件类型并选择解析方式
-            file_type = self._get_file_type(file_path)
-            
+            file_type = self._get_file_type(file_path, force_mineru)
+
             if file_type == 'pdf_image':
                 # 使用 MinerU 解析 PDF 和图片
                 self._parse_with_mineru(
@@ -235,7 +241,22 @@ class MinerUWorkerAPI(ls.LitAPI):
                     output_path=output_path
                 )
                 parse_method = 'MinerU'
-                
+
+            elif file_type == 'office_to_pdf':
+                # 先转换为 PDF，再用 MinerU 解析
+                logger.info(f"📊 Office document detected, converting to PDF first...")
+                converted_pdf_path = self._convert_office_to_pdf(Path(file_path), output_path)
+
+                self._parse_with_mineru(
+                    file_path=converted_pdf_path,
+                    file_name=file_name,
+                    task_id=task_id,
+                    backend=backend,
+                    options=options,
+                    output_path=output_path
+                )
+                parse_method = 'MinerU (Office→PDF→Parse)'
+
             else:  # file_type == 'markitdown'
                 # 使用 markitdown 解析所有其他格式
                 self._parse_with_markitdown(
@@ -244,14 +265,14 @@ class MinerUWorkerAPI(ls.LitAPI):
                     output_path=output_path
                 )
                 parse_method = 'MarkItDown'
-            
+
             # 更新状态为成功
             success = self.db.update_task_status(
-                task_id, 'completed', 
+                task_id, 'completed',
                 result_path=str(output_path),
                 worker_id=self.worker_id
             )
-            
+
             if success:
                 logger.info(f"✅ Task {task_id} completed by {self.worker_id}")
                 logger.info(f"   Parser: {parse_method}")
@@ -261,7 +282,7 @@ class MinerUWorkerAPI(ls.LitAPI):
                     f"⚠️  Task {task_id} was modified by another process. "
                     f"Worker {self.worker_id} completed the work but status update was rejected."
                 )
-            
+
         finally:
             # 清理临时文件
             try:
@@ -278,25 +299,89 @@ class MinerUWorkerAPI(ls.LitAPI):
         """
         return request.get('action', 'poll')
     
-    def _get_file_type(self, file_path: str) -> str:
+    def _get_file_type(self, file_path: str, force_mineru: bool = False) -> str:
         """
         判断文件类型
-        
+
         Args:
             file_path: 文件路径
-            
+            force_mineru: 是否强制使用 MinerU 解析
+
         Returns:
             'pdf_image': PDF 或图片格式，使用 MinerU 解析
+            'office_to_pdf': Office 格式且强制使用 MinerU，需要先转 PDF
             'markitdown': 其他所有格式，使用 markitdown 解析
         """
         suffix = Path(file_path).suffix.lower()
-        
+
         if suffix in self.PDF_IMAGE_FORMATS:
             return 'pdf_image'
+        elif suffix in self.OFFICE_FORMATS and force_mineru:
+            return 'office_to_pdf'
         else:
             # 所有非 PDF/图片格式都使用 markitdown
             return 'markitdown'
-    
+
+    def _convert_office_to_pdf(self, file_path: Path, output_path: Path) -> Path:
+        """
+        使用 LibreOffice 将 Office 文档转换为 PDF
+
+        Args:
+            file_path: Office 文档路径
+            output_path: 输出目录
+
+        Returns:
+            转换后的 PDF 文件路径
+        """
+        logger.info(f"🔄 Converting Office document to PDF: {file_path.name}")
+
+        try:
+            # 创建临时目录用于转换
+            temp_dir = tempfile.mkdtemp()
+
+            # 使用 LibreOffice 转换为 PDF
+            cmd = [
+                'libreoffice',
+                '--headless',
+                '--convert-to', 'pdf',
+                '--outdir', temp_dir,
+                str(file_path)
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120  # 2分钟超时
+            )
+
+            if result.returncode != 0:
+                logger.error(f"❌ LibreOffice conversion failed: {result.stderr}")
+                raise RuntimeError(f"Failed to convert Office to PDF: {result.stderr}")
+
+            # 查找转换后的 PDF 文件
+            converted_pdf = Path(temp_dir) / f"{file_path.stem}.pdf"
+
+            if not converted_pdf.exists():
+                raise RuntimeError(f"Converted PDF not found: {converted_pdf}")
+
+            # 移动到输出目录
+            final_pdf_path = output_path / f"{file_path.stem}_converted.pdf"
+            shutil.move(str(converted_pdf), str(final_pdf_path))
+
+            # 清理临时目录
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+            logger.info(f"✅ Successfully converted Office to PDF: {final_pdf_path}")
+            return final_pdf_path
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"❌ LibreOffice conversion timeout")
+            raise RuntimeError("Office to PDF conversion timeout (>120s)")
+        except Exception as e:
+            logger.error(f"❌ Failed to convert Office document: {e}")
+            raise RuntimeError(f"Failed to convert Office document: {e}")
+
     def _parse_with_mineru(self, file_path: Path, file_name: str, task_id: str, 
                            backend: str, options: dict, output_path: Path):
         """
