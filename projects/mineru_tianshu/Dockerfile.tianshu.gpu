@@ -2,8 +2,9 @@
 # 天枢文档解析服务 - GPU版本(国内环境)
 
 # 使用国内镜像源（DaoCloud）加速下载
-# 如果你的 Docker 已配置镜像源，可以改回：nvidia/cuda:12.0.0-runtime-ubuntu22.04
-FROM docker.m.daocloud.io/nvidia/cuda:12.0.0-runtime-ubuntu22.04
+# 如果你的 Docker 已配置镜像源，可以改回：nvidia/cuda:12.6.0-runtime-ubuntu24.04
+# 升级到 Ubuntu 24.04 以获得更新的 LibreOffice 版本（24.2.x vs 7.3.x）
+FROM docker.m.daocloud.io/nvidia/cuda:12.6.0-runtime-ubuntu24.04
 
 LABEL maintainer="MinerU Team"
 LABEL description="MinerU Tianshu - Enterprise Document Parsing Service (GPU Mode)"
@@ -19,16 +20,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     # 工作目录
     APP_HOME=/app/mineru_tianshu
 
-# 配置国内 apt 源(阿里云镜像 - Ubuntu 22.04)
-RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list && \
-    sed -i 's@//.*security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list
+# 配置国内 apt 源(阿里云镜像 - Ubuntu 24.04)
+RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list.d/ubuntu.sources && \
+    sed -i 's@//.*security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
 
-# 安装 Python 3.10 和系统依赖(不含LibreOffice)
+# 安装 Python 3.12 和系统依赖(不含LibreOffice)
+# Ubuntu 24.04 默认使用 Python 3.12
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         # Python 环境
-        python3.10 \
-        python3.10-dev \
+        python3.12 \
+        python3.12-dev \
         python3-pip \
         # C/C++ 编译工具 (vLLM Triton 需要)
         gcc \
@@ -59,19 +61,22 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 LibreOffice (使用官方源,避免阿里云镜像的大文件下载问题)
-RUN sed -i 's@//mirrors.aliyun.com@//archive.ubuntu.com@g' /etc/apt/sources.list && \
+# 安装 LibreOffice (使用官方源获得更新版本 ~24.2.x)
+# Ubuntu 24.04 包含的 LibreOffice 比 22.04 的 7.3.x 新得多
+RUN sed -i 's@//mirrors.aliyun.com@//archive.ubuntu.com@g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || \
+    sed -i 's@//mirrors.aliyun.com@//archive.ubuntu.com@g' /etc/apt/sources.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         libreoffice-writer \
         libreoffice-core \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
-    && sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list
+    && (sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || \
+        sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list)
 
-# 设置 Python 3.10 为默认 python3
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
-    update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
+# 设置 Python 3.12 为默认 python3
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
 # 修复 /tmp 目录权限 (apt-get 和 Triton 编译需要)
 RUN chmod 1777 /tmp

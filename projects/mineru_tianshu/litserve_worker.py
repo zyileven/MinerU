@@ -359,11 +359,45 @@ class MinerUWorkerAPI(ls.LitAPI):
                 logger.error(f"❌ LibreOffice conversion failed: {result.stderr}")
                 raise RuntimeError(f"Failed to convert Office to PDF: {result.stderr}")
 
+            # 输出 LibreOffice 的执行结果（调试用）
+            logger.info(f"📋 LibreOffice returncode: {result.returncode}")
+            logger.info(f"📋 LibreOffice stdout: {result.stdout}")
+            if result.stderr:
+                logger.warning(f"📋 LibreOffice stderr: {result.stderr}")
+
             # 查找转换后的 PDF 文件
+            # 先列出临时目录中的所有文件（调试用）
+            try:
+                all_files = list(Path(temp_dir).iterdir())
+                logger.info(f"📂 Files in temp dir {temp_dir}:")
+                for f in all_files:
+                    logger.info(f"   - {f.name} ({f.stat().st_size} bytes)")
+            except Exception as e:
+                logger.error(f"❌ Failed to list temp dir: {e}")
+
             converted_pdf = Path(temp_dir) / f"{file_path.stem}.pdf"
+            logger.info(f"🔍 Looking for: {converted_pdf}")
+            logger.info(f"🔍 File exists: {converted_pdf.exists()}")
 
             if not converted_pdf.exists():
-                raise RuntimeError(f"Converted PDF not found: {converted_pdf}")
+                # 尝试查找任何 PDF 文件
+                pdf_files = list(Path(temp_dir).glob('*.pdf'))
+                logger.error(f"❌ Expected PDF not found: {converted_pdf}")
+                logger.error(f"   PDF files in temp dir: {[f.name for f in pdf_files]}")
+
+                if pdf_files:
+                    # 如果找到其他 PDF 文件，使用第一个
+                    converted_pdf = pdf_files[0]
+                    logger.warning(f"⚠️  Using alternative PDF: {converted_pdf.name}")
+                else:
+                    # 提供更详细的错误信息
+                    raise RuntimeError(
+                        f"Converted PDF not found: {converted_pdf}\n"
+                        f"Temp dir: {temp_dir}\n"
+                        f"Files in temp dir: {[f.name for f in all_files]}\n"
+                        f"LibreOffice stdout: {result.stdout}\n"
+                        f"LibreOffice stderr: {result.stderr}"
+                    )
 
             # 移动到输出目录
             final_pdf_path = output_path / f"{file_path.stem}_converted.pdf"
