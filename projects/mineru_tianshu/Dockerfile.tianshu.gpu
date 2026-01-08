@@ -1,138 +1,94 @@
-# MinerU Tianshu Docker Image - GPU Version (China)
-# 天枢文档解析服务 - GPU版本(国内环境)
-
-# 使用国内镜像源（DaoCloud）加速下载
-# 如果你的 Docker 已配置镜像源，可以改回：nvidia/cuda:12.6.0-runtime-ubuntu24.04
-# 升级到 Ubuntu 24.04 以获得更新的 LibreOffice 版本（24.2.x vs 7.3.x）
 FROM docker.m.daocloud.io/nvidia/cuda:12.6.0-runtime-ubuntu24.04
 
 LABEL maintainer="MinerU Team"
 LABEL description="MinerU Tianshu - Enterprise Document Parsing Service (GPU Mode)"
 
-# 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    # NVIDIA/CUDA 环境变量
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    # MinerU 配置
     MINERU_MODEL_SOURCE=local \
-    # 工作目录
     APP_HOME=/app/mineru_tianshu
 
-# 配置国内 apt 源(阿里云镜像 - Ubuntu 24.04)
 RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list.d/ubuntu.sources && \
-    sed -i 's@//.*security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+    sed -i 's@//.*security.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true && \
+    rm -f /etc/apt/sources.list.d/cuda*.list 2>/dev/null || true
 
-# 安装 Python 3.12 和系统依赖(不含LibreOffice)
-# Ubuntu 24.04 默认使用 Python 3.12
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        # Python 环境
         python3.12 \
         python3.12-dev \
+        python3.12-venv \
         python3-pip \
-        # C/C++ 编译工具 (vLLM Triton 需要)
         gcc \
         g++ \
         make \
-        # lxml 编译依赖
         libxml2-dev \
         libxslt1-dev \
-        # OpenCV 依赖
         libgl1 \
         libglib2.0-0 \
         libsm6 \
         libxext6 \
         libxrender-dev \
         libgomp1 \
-        # 音频/视频处理依赖
         ffmpeg \
-        # 中文字体支持
         fonts-noto-core \
         fonts-noto-cjk \
         fontconfig \
-        # 网络工具(调试用)
         curl \
         wget \
-        # Git(可能需要)
         git \
     && fc-cache -fv \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 LibreOffice (使用官方源获得更新版本 ~24.2.x)
-# Ubuntu 24.04 包含的 LibreOffice 比 22.04 的 7.3.x 新得多
-RUN sed -i 's@//mirrors.aliyun.com@//archive.ubuntu.com@g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || \
-    sed -i 's@//mirrors.aliyun.com@//archive.ubuntu.com@g' /etc/apt/sources.list && \
+RUN sed -i.bak 's@//mirrors.aliyun.com@//archive.ubuntu.com@g' /etc/apt/sources.list.d/ubuntu.sources && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         libreoffice-writer \
-        libreoffice-core \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    && (sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || \
-        sed -i 's@//.*archive.ubuntu.com@//mirrors.aliyun.com@g' /etc/apt/sources.list)
+        libreoffice-core && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    mv /etc/apt/sources.list.d/ubuntu.sources.bak /etc/apt/sources.list.d/ubuntu.sources
 
-# 设置 Python 3.12 为默认 python3
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
     update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1
 
-# 修复 /tmp 目录权限 (apt-get 和 Triton 编译需要)
 RUN chmod 1777 /tmp
 
-# 创建工作目录
 WORKDIR ${APP_HOME}
 
-# 安装 Python 依赖 (分步安装避免依赖解析过深)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --upgrade pip setuptools wheel && \
-    # 第一步: 先安装基础依赖 \
-    python3 -m pip install "torch>=2.0.0" "transformers>=4.40.0" "numpy>=1.24.0,<2.0.0" "einops>=0.8.0" && \
-    # 第二步: 安装 vLLM (最复杂的包) \
-    python3 -m pip install "vllm>=0.10.1.1,<0.12" && \
-    # 第三步: 安装 MinerU \
-    python3 -m pip install "mineru[core]>=2.5.0" && \
-    # 第四步: 安装 Web 框架和服务依赖 \
-    python3 -m pip install "litserve>=0.2.0" "fastapi>=0.115.0" "uvicorn[standard]>=0.32.0" "aiohttp>=3.11.0" "loguru>=0.7.0" && \
-    # 第五步: 安装图像增强依赖 \
-    python3 -m pip install "albumentations>=1.4.4,<2.0.0" "albucore>=0.0.13,<0.0.20" && \
-    # 第六步: 安装 Office 文档解析依赖 \
-    python3 -m pip install "markdownify>=1.2.2" "markitdown[all]>=0.1.3" && \
-    # 第七步: 安装对象存储依赖 \
-    python3 -m pip install "minio>=7.2.0" && \
-    # 验证关键包是否安装成功 \
-    python3 -c "import vllm; import mineru; import litserve; import fastapi; import uvicorn; import aiohttp; import loguru; import albumentations; import markitdown; import minio; print('✅ All packages installed successfully')"
+RUN python3 -m venv /opt/venv
 
-# 预先创建 mineru.json 配置文件，避免下载时访问 jsdelivr CDN
-# 这样 download_and_modify_json 会直接使用本地文件而不是从网络下载
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "torch>=2.0.0" "transformers>=4.40.0" "numpy>=1.24.0,<2.0.0" "einops>=0.8.0" && \
+    pip install "vllm>=0.10.1.1,<0.12" && \
+    pip install "mineru[core]>=2.5.0" && \
+    pip install "litserve>=0.2.0" "fastapi>=0.115.0" "uvicorn[standard]>=0.32.0" "aiohttp>=3.11.0" "loguru>=0.7.0" && \
+    pip install "albumentations>=1.4.4,<2.0.0" "albucore>=0.0.13,<0.0.20" && \
+    pip install "markdownify>=1.2.2" "markitdown[all]>=0.1.3" && \
+    pip install "minio>=7.2.0" && \
+    python -c "import vllm; import mineru; import litserve; import fastapi; import uvicorn; import aiohttp; import loguru; import albumentations; import markitdown; import minio; print('✅ All packages installed successfully')"
+
 RUN echo '{"config_version": "1.3.1", "models-dir": {"pipeline": "", "vlm": ""}}' > /root/mineru.json
 
-# 下载 MinerU 模型(使用 modelscope 国内源)
-# 临时覆盖 MINERU_MODEL_SOURCE 为 modelscope 以便下载
 RUN MINERU_MODEL_SOURCE=modelscope mineru-models-download -s modelscope -m all && \
     echo "✅ Models downloaded successfully"
 
-# 复制项目文件
-COPY task_db.py .
-COPY api_server.py .
-COPY litserve_worker.py .
-COPY task_scheduler.py .
-COPY start_all.py .
-COPY client_example.py .
-
-# 创建数据和输出目录
 RUN mkdir -p /data/db /data/output && \
     chmod -R 755 /data
+
+COPY task_db.py api_server.py litserve_worker.py task_scheduler.py start_all.py client_example.py ./
 
 # 暴露端口
 # API Server: 8100
 # Worker Server: 9100
 EXPOSE 8100 9100
 
-# 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8100/docs || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8100/docs', timeout=5)" || exit 1
 
 # 启动脚本 (GPU 模式)
 CMD ["python", "start_all.py", \
